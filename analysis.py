@@ -6,10 +6,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
 
-# ---------- CONFIG (adjust if your column names change) ----------
 JSON_PATH = Path("fraud_results.json")
 
-# Your JSON fields from the snippet you shared:
 TEXT_COL        = "cleaned_text"
 CLASS_COL       = "fraud_related"      # boolean True/False
 REASON_COL      = "fraud_reason"
