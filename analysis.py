@@ -25,7 +25,7 @@ plt.rcParams.update({
     "grid.color": USAA_LIGHT_GRAY,
     "grid.linestyle": "--",
     "grid.linewidth": 0.7,
-    "axes.grid": False,         # we'll manually turn grid on when we want it
+    "axes.grid": False,        
     "font.size": 12,
     "axes.titleweight": "bold",
 })
