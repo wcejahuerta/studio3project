@@ -1,3 +1,4 @@
+# This script:
 #   - Loads fraud_results.json
 #   - Cleans text and finds top keywords
 #   - Buckets fraud reasons into trend categories
@@ -9,7 +10,39 @@ from collections import Counter
 
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
+
+# ---------- USAA THEME (NAVY + GOLD + BABY BLUE) ----------
+USAA_NAVY = "#002F6C"
+USAA_GOLD = "#CC9900"
+USAA_SLATE = "#4D4D4F"
+USAA_LIGHT_GRAY = "#A7A8AA"
+USAA_BABY_BLUE = "#A7C7E7"  # soft blue accent
+
+# Global matplotlib style
+plt.rcParams.update({
+    "figure.figsize": (8, 5),
+    "axes.facecolor": "white",
+    "figure.facecolor": "white",
+    "axes.edgecolor": USAA_SLATE,
+    "axes.labelcolor": USAA_SLATE,
+    "xtick.color": USAA_SLATE,
+    "ytick.color": USAA_SLATE,
+    "grid.color": USAA_LIGHT_GRAY,
+    "grid.linestyle": "--",
+    "grid.linewidth": 0.7,
+    "axes.grid": True,
+    "font.size": 12,
+    "axes.titleweight": "bold",
+})
+
+# Custom colormap for heatmap: navy → baby blue → white → gold
+USAA_CMAP = LinearSegmentedColormap.from_list(
+    "usaa_cmap",
+    [USAA_NAVY, USAA_BABY_BLUE, "white", USAA_GOLD]
+)
+# ----------------------------------------------------------
 
 # ---------- CONFIG ----------
 JSON_PATH   = Path("fraud_results.json")
@@ -18,7 +51,7 @@ TEXT_COL    = "cleaned_text"
 CLASS_COL   = "fraud_related"      # boolean True/False (optional)
 REASON_COL  = "fraud_reason"       # text explaining why it's fraud (optional)
 CLUSTER_COL = "kmeans_cluster"     # optional
-DATE_COL    = "date"               # <-- scraped from the website, e.g. "December 4, 2024"
+DATE_COL    = "date"               # scraped from the website, e.g. "December 4, 2024"
 
 # Extra stop-words (domain-specific junk you don't want in Top 5)
 EXTRA_STOPS = {
@@ -91,10 +124,9 @@ def main():
 
     # ---- Date handling (uses scraped "date" column)
     if DATE_COL in df.columns:
-        # Your JSON has dates like "December 4, 2024"
         df[DATE_COL] = pd.to_datetime(
             df[DATE_COL],
-            format="%B %d, %Y",      # MonthName Day, Year
+            format="%B %d, %Y",      # e.g. "December 4, 2024"
             errors="coerce"
         )
         df["year"] = df[DATE_COL].dt.year
@@ -111,7 +143,7 @@ def main():
     # ---- Keep only fraud-related rows if available; else use all rows
     work = df
     if CLASS_COL in df.columns:
-        mask = df[CLASS_COL].astype(str).str.lower().isin(["true","1","yes"])
+        mask = df[CLASS_COL].astype(str).str.lower().isin(["true", "1", "yes"])
         if mask.any():
             work = df[mask]
 
@@ -134,16 +166,27 @@ def main():
     pd.DataFrame(top20, columns=["Keyword","Count"]).to_csv("top20_keywords.csv", index=False)
     print("Saved: top5_keywords.csv, top20_keywords.csv")
 
-    # Chart: Top 5 keywords
+    # Chart: Top 5 keywords (USAA-styled)
     if top5:
         labels = [w for w,_ in top5]
         values = [c for _,c in top5]
         plt.figure()
-        plt.bar(labels, values)
-        plt.title("Top 5 Keywords (fraud-related articles)")
+        plt.grid(True, axis="y")
+        bars = plt.bar(
+            labels,
+            values,
+            color=USAA_NAVY,
+            edgecolor=USAA_SLATE,
+            linewidth=1.2
+        )
+        plt.title("Top 5 Keywords (Fraud-Related Articles)")
         plt.ylabel("Count")
+
+        for b in bars:
+            b.set_alpha(0.95)
+
         plt.tight_layout()
-        plt.savefig("top5_keywords.png", dpi=200)
+        plt.savefig("top5_keywords.png", dpi=300)
         print("Saved: top5_keywords.png")
 
     # ============================================================
@@ -169,13 +212,25 @@ def main():
         trend_counts.to_csv("trend_counts.csv")
         print("Saved: trend_counts.csv")
 
-        # Chart: Trends
+        # Chart: Trends (USAA-styled)
         plt.figure()
-        trend_counts.plot(kind="bar")
-        plt.title("Fraud Trends (from LLM reasons)")
+        plt.grid(True, axis="y")
+        colors = [
+            USAA_NAVY if i % 2 == 0 else USAA_GOLD
+            for i in range(len(trend_counts))
+        ]
+        ax = trend_counts.plot(
+            kind="bar",
+            color=colors,
+            edgecolor=USAA_SLATE,
+            linewidth=1.2
+        )
+        plt.title("Fraud Trends (from LLM Reasons)")
         plt.ylabel("Number of Articles")
+        plt.xticks(rotation=35, ha="right")
+
         plt.tight_layout()
-        plt.savefig("top_trends.png", dpi=200)
+        plt.savefig("top_trends.png", dpi=300)
         print("Saved: top_trends.png")
     else:
         print("\nNo REASON column found; skipping trend chart.")
@@ -184,19 +239,45 @@ def main():
     # 4) ARTICLES BY YEAR (using scraped date)
     # ============================================================
     if DATE_COL in df.columns and df[DATE_COL].notna().any():
-        year_counts = df["year"].value_counts().sort_index()
+        # Make sure years are integers (no 2024.0)
+        year_counts = (
+            df["year"]
+            .dropna()
+            .astype(int)
+            .value_counts()
+            .sort_index()
+        )
         print("\nArticles by year:\n", year_counts)
 
         year_counts.to_csv("articles_by_year.csv")
         print("Saved: articles_by_year.csv")
 
         plt.figure()
-        year_counts.plot(kind="bar")
-        plt.title("Articles by Year (from scraped dates)")
+        plt.grid(True, axis="y")
+        ax = year_counts.plot(
+            kind="bar",
+            color=USAA_NAVY,
+            edgecolor=USAA_SLATE,
+            linewidth=1.2
+        )
+        plt.title("Articles by Year (Scraped Dates)")
         plt.ylabel("Number of Articles")
         plt.xlabel("Year")
+
+        # annotate counts on top of bars
+        for p in ax.patches:
+            height = p.get_height()
+            ax.annotate(
+                str(int(height)),
+                (p.get_x() + p.get_width() / 2, height),
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                color=USAA_SLATE
+            )
+
         plt.tight_layout()
-        plt.savefig("articles_by_year.png", dpi=200)
+        plt.savefig("articles_by_year.png", dpi=300)
         print("Saved: articles_by_year.png")
     else:
         print("\nNo valid dates found; skipping articles-by-year chart.")
@@ -210,7 +291,6 @@ def main():
         and df[DATE_COL].notna().any()
         and REASON_COL in df.columns
     ):
-        # Use the same trend mapping, but drop rows with no year
         trend_series = df[REASON_COL].astype(str).apply(assign_trend)
         valid_mask = df["year"].notna()
         trend_by_year = pd.crosstab(df.loc[valid_mask, "year"], trend_series[valid_mask])
@@ -219,11 +299,19 @@ def main():
         trend_by_year.to_csv("trend_by_year.csv")
         print("Saved: trend_by_year.csv")
 
-        # Heatmap-style visualization using matplotlib
+        # Heatmap-style visualization using USAA colormap
         if not trend_by_year.empty:
             plt.figure(figsize=(8, 4))
-            plt.imshow(trend_by_year.values, aspect="auto")
-            plt.colorbar(label="Number of Articles")
+            plt.grid(False)  # no grid on heatmap
+
+            plt.imshow(
+                trend_by_year.values,
+                aspect="auto",
+                cmap=USAA_CMAP,
+                interpolation="nearest"   # solid blocks, no tiny line artifacts
+            )
+            cbar = plt.colorbar()
+            cbar.set_label("Number of Articles")
 
             plt.xticks(
                 ticks=range(len(trend_by_year.columns)),
@@ -235,11 +323,11 @@ def main():
                 ticks=range(len(trend_by_year.index)),
                 labels=trend_by_year.index
             )
-            plt.title("Fraud Trends by Year (Heatmap)")
+            plt.title("Fraud Trends by Year")
             plt.xlabel("Trend Bucket")
             plt.ylabel("Year")
             plt.tight_layout()
-            plt.savefig("trend_by_year_heatmap.png", dpi=200)
+            plt.savefig("trend_by_year_heatmap.png", dpi=300)
             print("Saved: trend_by_year_heatmap.png")
     else:
         print("\nSkipping trend-by-year heatmap (need both DATE and REASON columns).")
