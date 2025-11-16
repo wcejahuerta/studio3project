@@ -1,9 +1,3 @@
-# This script:
-#   - Loads fraud_results.json
-#   - Cleans text and finds top keywords
-#   - Buckets fraud reasons into trend categories
-#   - Uses scraped article dates to show trends over time
-
 import json, re
 from pathlib import Path
 from collections import Counter
@@ -11,16 +5,15 @@ from collections import Counter
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
-# ---------- USAA THEME (NAVY + GOLD + BABY BLUE) ----------
+# ---------- USAA THEME ----------
 USAA_NAVY = "#002F6C"
 USAA_GOLD = "#CC9900"
+USAA_BABY_BLUE = "#A7C7E7"
 USAA_SLATE = "#4D4D4F"
 USAA_LIGHT_GRAY = "#A7A8AA"
-USAA_BABY_BLUE = "#A7C7E7"  # soft blue accent
 
-# Global matplotlib style
 plt.rcParams.update({
     "figure.figsize": (8, 5),
     "axes.facecolor": "white",
@@ -32,28 +25,26 @@ plt.rcParams.update({
     "grid.color": USAA_LIGHT_GRAY,
     "grid.linestyle": "--",
     "grid.linewidth": 0.7,
-    "axes.grid": True,
+    "axes.grid": False,         # we'll manually turn grid on when we want it
     "font.size": 12,
     "axes.titleweight": "bold",
 })
 
-# Custom colormap for heatmap: navy → baby blue → white → gold
+# Heatmap colormap (navy → baby blue → white → gold)
 USAA_CMAP = LinearSegmentedColormap.from_list(
-    "usaa_cmap",
-    [USAA_NAVY, USAA_BABY_BLUE, "white", USAA_GOLD]
+    "usaa_cmap", [USAA_NAVY, USAA_BABY_BLUE, "white", USAA_GOLD]
 )
-# ----------------------------------------------------------
+# ---------------------------------
 
 # ---------- CONFIG ----------
 JSON_PATH   = Path("fraud_results.json")
 
 TEXT_COL    = "cleaned_text"
-CLASS_COL   = "fraud_related"      # boolean True/False (optional)
-REASON_COL  = "fraud_reason"       # text explaining why it's fraud (optional)
-CLUSTER_COL = "kmeans_cluster"     # optional
-DATE_COL    = "date"               # scraped from the website, e.g. "December 4, 2024"
+CLASS_COL   = "fraud_related"
+REASON_COL  = "fraud_reason"
+DATE_COL    = "date"
+CLUSTER_COL = "kmeans_cluster"
 
-# Extra stop-words (domain-specific junk you don't want in Top 5)
 EXTRA_STOPS = {
     "occ","fdic","frs","federal","reserve","treasury","office","department",
     "united","states","u","s","section","bank","banks","banking","institution",
@@ -62,51 +53,34 @@ EXTRA_STOPS = {
     "comment","comments","docket","system","board","governors"
 }
 
-# Trend bucketing: maps substrings -> human label
+# LOB keyword lists (from teammate)
+insurance_keywords = ["claim", "payout", "collision", "adjuster", "policyholder"]
+banking_keywords   = ["zelle", "wire", "account takeover", "credit card", "ach"]
+investing_keywords = ["retirement", "ira", "rollover", "brokerage", "portfolio"]
+
+# Trend buckets
 TREND_MAP = {
     "phish": "Phishing / Social engineering",
     "impersonat": "Identity theft / ATO",
     "identity": "Identity theft / ATO",
     "account takeover": "Identity theft / ATO",
     "check": "Check fraud",
-    "peer": "P2P payment scams",      # catches "peer-to-peer"
+    "peer": "P2P payment scams",
     "zelle": "P2P payment scams",
     "invest": "Investment / Crypto scams",
     "crypto": "Investment / Crypto scams",
     "wire": "Wire / Transfer scams",
     "ach": "ACH / Transfer fraud",
     "elder": "Elder financial exploitation",
-    "scam": "General scams"
+    "scam": "General scams",
 }
-# ---------------------------------------------------------------
+
+# ---------- HELPERS ----------
 
 def load_any_json(path: Path):
-    """Load JSON that could be a list, dict, or NDJSON; return list of records."""
+    """Load JSON file into Python object."""
     with path.open("r", encoding="utf-8") as f:
-        txt = f.read().strip()
-    try:
-        obj = json.loads(txt)
-    except json.JSONDecodeError:
-        # NDJSON fallback
-        records = []
-        for line in txt.splitlines():
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-        return records
-
-    if isinstance(obj, list):
-        return obj
-    if isinstance(obj, dict):
-        # common container keys
-        for k in ["results","data","items","records","rows"]:
-            if isinstance(obj.get(k), list):
-                return obj[k]
-        # dict of id -> record or a single record
-        if all(isinstance(v, dict) for v in obj.values()):
-            return list(obj.values())
-        return [obj]
-    raise ValueError("Unsupported JSON structure")
+        return json.loads(f.read().strip())
 
 def assign_trend(reason_text: str) -> str:
     """Map free-text fraud_reason to a trend bucket."""
@@ -116,130 +90,141 @@ def assign_trend(reason_text: str) -> str:
             return label
     return "Other / General fraud"
 
+def detect_lob(text: str) -> str:
+    """Roughly classify article into Banking / Insurance / Investing."""
+    txt = (text or "").lower()
+    scores = {
+        "Insurance": sum(word in txt for word in insurance_keywords),
+        "Banking":   sum(word in txt for word in banking_keywords),
+        "Investing": sum(word in txt for word in investing_keywords),
+    }
+    # Return the LOB with the highest score (ties are fine)
+    return max(scores, key=scores.get)
+
+# ---------- MAIN ----------
+
 def main():
-    # ---- Load & normalize
+    # ---- Load & normalize ----
     records = load_any_json(JSON_PATH)
     df = pd.json_normalize(records, sep=".")
     print("Columns:", df.columns.tolist())
 
-    # ---- Date handling (uses scraped "date" column)
+    # ---- Parse dates -> year ----
     if DATE_COL in df.columns:
         df[DATE_COL] = pd.to_datetime(
             df[DATE_COL],
-            format="%B %d, %Y",      # e.g. "December 4, 2024"
+            format="%B %d, %Y",   # e.g. "December 4, 2024"
             errors="coerce"
         )
-        df["year"] = df[DATE_COL].dt.year
+        df["year"] = df[DATE_COL].dt.year.astype("Int64")
     else:
-        print(f"⚠️ Column '{DATE_COL}' not found; skipping date-based analysis.")
+        print("⚠️ No 'date' column found; skipping year-based analysis.")
 
-    # ---- Basic column presence checks
-    for col in [TEXT_COL, REASON_COL, CLASS_COL]:
-        if col not in df.columns:
-            print(f"⚠️ Column '{col}' not found. Available columns: {df.columns.tolist()}")
-    if TEXT_COL not in df.columns:
-        raise KeyError(f"Required text column '{TEXT_COL}' is missing.")
-
-    # ---- Keep only fraud-related rows if available; else use all rows
-    work = df
+    # ---- Keep only fraud-related ----
     if CLASS_COL in df.columns:
-        mask = df[CLASS_COL].astype(str).str.lower().isin(["true", "1", "yes"])
-        if mask.any():
-            work = df[mask]
+        df = df[df[CLASS_COL] == True]
+
+    if df.empty:
+        print("⚠️ No fraud-related rows found. Nothing to plot.")
+        return
+
+    # ---- Detect Line of Business (LOB) ----
+    df["LOB"] = df[TEXT_COL].astype(str).apply(detect_lob)
+    print("\nLOB counts:\n", df["LOB"].value_counts())
 
     # ============================================================
-    # 1) TOP KEYWORDS (single words)
+    # 1) TOP KEYWORDS BY LOB (USAA styled) + LEGEND
+    #    (x-axis shows ONLY keywords, color shows LOB)
     # ============================================================
-    fraud_text = " ".join(work[TEXT_COL].astype(str)).lower()
-    words = re.findall(r"\b[a-z]{3,}\b", fraud_text)
+    lob_top = {}
 
-    stopset = ENGLISH_STOP_WORDS.union(EXTRA_STOPS)
-    tokens = [w for w in words if w not in stopset and not w.isdigit()]
+    for lob, rows in df.groupby("LOB"):
+        text = " ".join(rows[TEXT_COL].astype(str)).lower()
+        words = re.findall(r"\b[a-z]{3,}\b", text)
+        stopset = ENGLISH_STOP_WORDS.union(EXTRA_STOPS)
+        toks = [w for w in words if w not in stopset and not w.isdigit()]
+        counts = Counter(toks).most_common(7)
+        lob_top[lob] = counts
 
-    counts = Counter(tokens)
-    top5 = counts.most_common(5)
-    top20 = counts.most_common(20)
-    print("\nTop 5 keywords (stopwords removed):", top5)
+    # Map LOB -> color
+    lob_colors = {
+        "Banking":   USAA_NAVY,
+        "Insurance": USAA_GOLD,
+        "Investing": USAA_BABY_BLUE,
+    }
 
-    # Save keyword tables
-    pd.DataFrame(top5, columns=["Keyword","Count"]).to_csv("top5_keywords.csv", index=False)
-    pd.DataFrame(top20, columns=["Keyword","Count"]).to_csv("top20_keywords.csv", index=False)
-    print("Saved: top5_keywords.csv, top20_keywords.csv")
+    # Flatten into single list so x-axis labels are ONLY keywords
+    all_keywords = []
+    all_values = []
+    all_colors = []
 
-    # Chart: Top 5 keywords (USAA-styled)
-    if top5:
-        labels = [w for w,_ in top5]
-        values = [c for _,c in top5]
-        plt.figure()
-        plt.grid(True, axis="y")
-        bars = plt.bar(
-            labels,
-            values,
-            color=USAA_NAVY,
-            edgecolor=USAA_SLATE,
-            linewidth=1.2
-        )
-        plt.title("Top 5 Keywords (Fraud-Related Articles)")
-        plt.ylabel("Count")
+    for lob, items in lob_top.items():
+        for kw, count in items:
+            all_keywords.append(kw)
+            all_values.append(count)
+            all_colors.append(lob_colors.get(lob, USAA_SLATE))
 
-        for b in bars:
-            b.set_alpha(0.95)
+    x = range(len(all_keywords))
 
-        plt.tight_layout()
-        plt.savefig("top5_keywords.png", dpi=300)
-        print("Saved: top5_keywords.png")
+    plt.figure(figsize=(11, 6))
+    plt.grid(True, axis="y")
+
+    plt.bar(
+        x,
+        all_values,
+        color=all_colors,
+        edgecolor=USAA_SLATE,
+        linewidth=1.0,
+        alpha=0.9,
+    )
+
+    # X-axis labels are JUST the keywords now
+    plt.xticks(x, all_keywords, rotation=45, ha="right")
+
+    # Legend that always shows all 3 LOBs
+    handles = [
+        plt.Line2D([0], [0], color=USAA_NAVY,      lw=10, label="Banking"),
+        plt.Line2D([0], [0], color=USAA_GOLD,      lw=10, label="Insurance"),
+        plt.Line2D([0], [0], color=USAA_BABY_BLUE, lw=10, label="Investing"),
+    ]
+    plt.legend(handles=handles, title="Line of Business", loc="upper right")
+
+    plt.title("Top Keywords by Line of Business")
+    plt.ylabel("Keyword Frequency")
+    plt.tight_layout()
+    plt.savefig("lob_keywords.png", dpi=260)
+    print("Saved: lob_keywords.png")
 
     # ============================================================
-    # 2) PHRASES (bigrams/trigrams) – just to print some examples
+    # 2) FRAUD TRENDS (from LLM reasons)
     # ============================================================
-    try:
-        corpus = df[TEXT_COL].astype(str).tolist()
-        cv = CountVectorizer(ngram_range=(2,3), max_features=10, stop_words="english")
-        X = cv.fit_transform(corpus)
-        print("\nSample top phrases:", list(cv.get_feature_names_out())[:5])
-    except Exception as e:
-        print("\n(Skipping phrase extraction):", e)
-
-    # ============================================================
-    # 3) TREND BUCKETS (bar chart) – from LLM fraud_reason
-    # ============================================================
-    trend_counts = pd.Series(dtype=int)
-    trends = None
     if REASON_COL in df.columns:
-        trends = df[REASON_COL].astype(str).apply(assign_trend)
-        trend_counts = trends.value_counts().sort_values(ascending=False)
-        print("\nTrend buckets:\n", trend_counts)
+        trend_series = df[REASON_COL].astype(str).apply(assign_trend)
+        trend_counts = trend_series.value_counts()
         trend_counts.to_csv("trend_counts.csv")
-        print("Saved: trend_counts.csv")
+        print("\nTrend buckets:\n", trend_counts)
 
-        # Chart: Trends (USAA-styled)
         plt.figure()
         plt.grid(True, axis="y")
-        colors = [
-            USAA_NAVY if i % 2 == 0 else USAA_GOLD
-            for i in range(len(trend_counts))
-        ]
-        ax = trend_counts.plot(
+        trend_counts.plot(
             kind="bar",
-            color=colors,
+            color=USAA_NAVY,
             edgecolor=USAA_SLATE,
             linewidth=1.2
         )
         plt.title("Fraud Trends (from LLM Reasons)")
         plt.ylabel("Number of Articles")
         plt.xticks(rotation=35, ha="right")
-
         plt.tight_layout()
-        plt.savefig("top_trends.png", dpi=300)
+        plt.savefig("top_trends.png", dpi=260)
         print("Saved: top_trends.png")
     else:
-        print("\nNo REASON column found; skipping trend chart.")
+        print("\n⚠️ No REASON column; skipping trend chart.")
 
     # ============================================================
-    # 4) ARTICLES BY YEAR (using scraped date)
+    # 3) ARTICLES BY YEAR
     # ============================================================
-    if DATE_COL in df.columns and df[DATE_COL].notna().any():
-        # Make sure years are integers (no 2024.0)
+    if "year" in df.columns and df["year"].notna().any():
         year_counts = (
             df["year"]
             .dropna()
@@ -247,15 +232,14 @@ def main():
             .value_counts()
             .sort_index()
         )
-        print("\nArticles by year:\n", year_counts)
-
         year_counts.to_csv("articles_by_year.csv")
-        print("Saved: articles_by_year.csv")
+        print("\nArticles by year:\n", year_counts)
 
         plt.figure()
         plt.grid(True, axis="y")
-        ax = year_counts.plot(
-            kind="bar",
+        plt.bar(
+            year_counts.index.astype(str),
+            year_counts.values,
             color=USAA_NAVY,
             edgecolor=USAA_SLATE,
             linewidth=1.2
@@ -263,81 +247,55 @@ def main():
         plt.title("Articles by Year (Scraped Dates)")
         plt.ylabel("Number of Articles")
         plt.xlabel("Year")
-
-        # annotate counts on top of bars
-        for p in ax.patches:
-            height = p.get_height()
-            ax.annotate(
-                str(int(height)),
-                (p.get_x() + p.get_width() / 2, height),
-                ha="center",
-                va="bottom",
-                fontsize=10,
-                color=USAA_SLATE
-            )
-
         plt.tight_layout()
-        plt.savefig("articles_by_year.png", dpi=300)
+        plt.savefig("articles_by_year.png", dpi=260)
         print("Saved: articles_by_year.png")
     else:
-        print("\nNo valid dates found; skipping articles-by-year chart.")
+        print("\n⚠️ No valid years; skipping articles-by-year chart.")
 
     # ============================================================
-    # 5) TREND-BY-YEAR TABLE + HEATMAP
-    #    (crosses trend buckets with years)
+    # 4) TREND-BY-YEAR HEATMAP
     # ============================================================
     if (
-        DATE_COL in df.columns
-        and df[DATE_COL].notna().any()
+        "year" in df.columns
+        and df["year"].notna().any()
         and REASON_COL in df.columns
     ):
         trend_series = df[REASON_COL].astype(str).apply(assign_trend)
         valid_mask = df["year"].notna()
-        trend_by_year = pd.crosstab(df.loc[valid_mask, "year"], trend_series[valid_mask])
+        table = pd.crosstab(df.loc[valid_mask, "year"], trend_series[valid_mask])
+        print("\nTrend by year table:\n", table)
 
-        print("\nTrend by year (table):\n", trend_by_year)
-        trend_by_year.to_csv("trend_by_year.csv")
-        print("Saved: trend_by_year.csv")
-
-        # Heatmap-style visualization using USAA colormap
-        if not trend_by_year.empty:
-            plt.figure(figsize=(8, 4))
-            plt.grid(False)  # no grid on heatmap
+        if not table.empty:
+            plt.figure(figsize=(11, 5))
+            plt.grid(False)
 
             plt.imshow(
-                trend_by_year.values,
+                table.values,
                 aspect="auto",
                 cmap=USAA_CMAP,
-                interpolation="nearest"   # solid blocks, no tiny line artifacts
+                interpolation="nearest"   # clean blocks, no extra lines
             )
-            cbar = plt.colorbar()
-            cbar.set_label("Number of Articles")
 
             plt.xticks(
-                ticks=range(len(trend_by_year.columns)),
-                labels=trend_by_year.columns,
+                range(len(table.columns)),
+                table.columns,
                 rotation=45,
                 ha="right"
             )
             plt.yticks(
-                ticks=range(len(trend_by_year.index)),
-                labels=trend_by_year.index
+                range(len(table.index)),
+                table.index
             )
+            plt.colorbar(label="Number of Articles")
             plt.title("Fraud Trends by Year")
             plt.xlabel("Trend Bucket")
             plt.ylabel("Year")
             plt.tight_layout()
-            plt.savefig("trend_by_year_heatmap.png", dpi=300)
+            plt.savefig("trend_by_year_heatmap.png", dpi=260)
             print("Saved: trend_by_year_heatmap.png")
     else:
-        print("\nSkipping trend-by-year heatmap (need both DATE and REASON columns).")
-
-    # ============================================================
-    # 6) Optional: Cluster breakdown (if kmeans_cluster exists)
-    # ============================================================
-    if CLUSTER_COL in df.columns:
-        cluster_counts = df[CLUSTER_COL].value_counts().sort_index()
-        print("\nCluster counts:\n", cluster_counts)
+        print("\n⚠️ Skipping heatmap (need both year and fraud_reason).")
 
 if __name__ == "__main__":
     main()
